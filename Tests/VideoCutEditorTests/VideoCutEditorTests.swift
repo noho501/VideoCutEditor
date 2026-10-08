@@ -18,21 +18,30 @@ import Testing
     #expect(result[1] == VideoCut(startTime: 20, endTime: 30))
 }
 
-@Test func keepRangesFromCuts() async throws {
+@Test func selectedCutsRemainTheExportRanges() async throws {
     let cuts = [
-        VideoCut(startTime: 5, endTime: 10),
-        VideoCut(startTime: 15, endTime: 18)
+        VideoCut(startTime: 15, endTime: 18),
+        VideoCut(startTime: 5, endTime: 10)
     ]
 
-    let ranges = VideoCutValidator.keepRanges(duration: 20, removing: cuts)
+    let ranges = VideoCutValidator.normalizedCuts(cuts, duration: 20)
 
-    #expect(ranges.count == 3)
-    #expect(ranges[0].lowerBound == 0)
-    #expect(ranges[0].upperBound == 5)
-    #expect(ranges[1].lowerBound == 10)
-    #expect(ranges[1].upperBound == 15)
-    #expect(ranges[2].lowerBound == 18)
-    #expect(ranges[2].upperBound == 20)
+    #expect(ranges == [
+        VideoCut(startTime: 5, endTime: 10),
+        VideoCut(startTime: 15, endTime: 18)
+    ])
+}
+
+@Test func clampedCutsPreserveDistinctSourceOfTruthEntries() {
+    let cuts = [
+        VideoCut(startTime: 5, endTime: 10),
+        VideoCut(startTime: 8, endTime: 12)
+    ]
+
+    let result = VideoCutValidator.clampedCuts(cuts, duration: 20)
+
+    #expect(result.count == 2)
+    #expect(result == cuts)
 }
 
 @Test func normalizedCutsHandleAdjacentAndNonFiniteValues() {
@@ -49,6 +58,18 @@ import Testing
         VideoCut(startTime: 0, endTime: 2),
         VideoCut(startTime: 9, endTime: 10)
     ])
+}
+
+@Test func clampedCutsSupportMoreThanThirtyDistinctEntries() {
+    let cuts = (0..<35).map {
+        VideoCut(startTime: Double($0), endTime: Double($0) + 0.75)
+    }
+
+    let result = VideoCutValidator.clampedCuts(cuts, duration: 60)
+
+    #expect(result.count == 35)
+    #expect(result.first == cuts.first)
+    #expect(result.last == cuts.last)
 }
 
 @Test func timelineCoordinateConversionsRemainStableForLongVideo() {

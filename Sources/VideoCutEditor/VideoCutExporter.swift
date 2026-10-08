@@ -18,7 +18,7 @@ public final class VideoCutExporter {
             case .cannotCreateExportSession:
                 return "The export session couldn’t be created."
             case .noOutputContent:
-                return "The cuts remove the entire video."
+                return "Add at least one valid cut before exporting."
             case .unsupportedOutputType:
                 return "The source can’t be exported as MP4."
             }
@@ -75,12 +75,8 @@ public final class VideoCutExporter {
         let asset = AVURLAsset(url: sourceURL)
         let durationTime = try await asset.load(.duration)
         let duration = durationTime.seconds
-        let normalizedCuts = VideoCutValidator.normalizedCuts(cuts, duration: duration)
-        let keepRanges = VideoCutValidator.keepRanges(
-            duration: duration,
-            removing: normalizedCuts
-        )
-        guard !keepRanges.isEmpty else {
+        let selectedRanges = VideoCutValidator.normalizedCuts(cuts, duration: duration)
+        guard !selectedRanges.isEmpty else {
             throw ExportError.noOutputContent
         }
 
@@ -105,11 +101,11 @@ public final class VideoCutExporter {
         }
 
         var cursor = CMTime.zero
-        for range in keepRanges {
+        for cut in selectedRanges {
             try Task.checkCancellation()
             let timeRange = CMTimeRange(
-                start: CMTime(seconds: range.lowerBound, preferredTimescale: 600),
-                end: CMTime(seconds: range.upperBound, preferredTimescale: 600)
+                start: CMTime(seconds: cut.startTime, preferredTimescale: 600),
+                end: CMTime(seconds: cut.endTime, preferredTimescale: 600)
             )
             try destinationVideoTrack.insertTimeRange(
                 timeRange,
@@ -118,10 +114,15 @@ public final class VideoCutExporter {
             )
 
             for (index, sourceAudioTrack) in sourceAudioTracks.enumerated() {
+                let sourceAudioRange = try await sourceAudioTrack.load(.timeRange)
+                let availableRange = CMTimeRangeGetIntersection(timeRange, otherRange: sourceAudioRange)
+                guard !availableRange.isEmpty else { continue }
+
+                let audioOffset = availableRange.start - timeRange.start
                 try destinationAudioTracks[index]?.insertTimeRange(
-                    timeRange,
+                    availableRange,
                     of: sourceAudioTrack,
-                    at: cursor
+                    at: cursor + audioOffset
                 )
             }
             cursor = cursor + timeRange.duration

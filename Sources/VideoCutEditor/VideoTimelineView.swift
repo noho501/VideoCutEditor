@@ -33,6 +33,7 @@ public final class VideoTimelineView: UIView {
     public var canZoomOut: Bool { pointsPerSecond > minimumPointsPerSecond }
 
     public var onSeekRequested: ((TimeInterval) -> Void)?
+    public var onFinalSeekRequested: ((TimeInterval) -> Void)?
     public var onCurrentTimeChanged: ((TimeInterval) -> Void)?
     public var onScrubbingChanged: ((Bool) -> Void)?
     public var onSelectedCutChanged: ((Int) -> Void)?
@@ -353,7 +354,7 @@ extension VideoTimelineView: UIScrollViewDelegate {
         interaction = .idle
         onInteractionChanged?(interaction)
         onCurrentTimeChanged?(currentTime)
-        onSeekRequested?(currentTime)
+        onFinalSeekRequested?(currentTime)
         onScrubbingChanged?(false)
     }
 }

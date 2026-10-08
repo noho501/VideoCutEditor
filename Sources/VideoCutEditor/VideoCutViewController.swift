@@ -3,6 +3,7 @@ import Foundation
 #if canImport(UIKit) && canImport(AVFoundation)
 import UIKit
 @preconcurrency import AVFoundation
+@preconcurrency import Photos
 
 @MainActor
 public final class VideoCutViewController: UIViewController {
@@ -24,7 +25,12 @@ public final class VideoCutViewController: UIViewController {
     private let playerLayer = AVPlayerLayer()
     private var timeObserver: Any?
     private var interactionState: InteractionState = .idle
-    private var previewSkipTarget: TimeInterval?
+    private var previewCuts: [VideoCut] = []
+    private var previewCutIndex = 0
+    private var isAdvancingFinalPreview = false
+    private var pendingScrubTime: TimeInterval?
+    private var scrubSeekInFlight = false
+    private var scrubSeekGeneration = 0
 
     private let exporter = VideoCutExporter()
     private let videoContainer = UIView()
@@ -177,10 +183,16 @@ public final class VideoCutViewController: UIViewController {
     }
 
     private func configurePlayerControls() {
-        playPauseButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
-        playPauseButton.tintColor = .white
-        playPauseButton.backgroundColor = UIColor.black.withAlphaComponent(0.4)
-        playPauseButton.layer.cornerRadius = 22
+        var configuration = UIButton.Configuration.plain()
+        configuration.image = UIImage(
+            systemName: "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        )
+        configuration.baseForegroundColor = .white
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        configuration.background.backgroundColor = UIColor.black.withAlphaComponent(0.4)
+        configuration.background.cornerRadius = 22
+        playPauseButton.configuration = configuration
         playPauseButton.addTarget(self, action: #selector(playPauseTapped), for: .touchUpInside)
         playPauseButton.accessibilityLabel = "Play or pause video"
         playPauseButton.translatesAutoresizingMaskIntoConstraints = false
@@ -234,10 +246,15 @@ public final class VideoCutViewController: UIViewController {
     }
 
     private func configureZoomButton(_ button: UIButton, imageName: String, action: Selector) {
-        button.configuration = .bordered()
-        button.configuration?.image = UIImage(systemName: imageName)
-        button.configuration?.baseForegroundColor = .white
-        button.configuration?.cornerStyle = .capsule
+        var configuration = UIButton.Configuration.bordered()
+        configuration.image = UIImage(
+            systemName: imageName,
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
+        )
+        configuration.baseForegroundColor = .white
+        configuration.cornerStyle = .capsule
+        configuration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        button.configuration = configuration
         button.addTarget(self, action: action, for: .touchUpInside)
         button.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(button)
@@ -274,7 +291,13 @@ public final class VideoCutViewController: UIViewController {
         timeline.cuts = cuts
         timeline.selectedCutIndex = nil
         timeline.onSeekRequested = { [weak self] time in
-            self?.seek(to: time, precise: false)
+            self?.requestScrubSeek(to: time)
+        }
+        timeline.onFinalSeekRequested = { [weak self] time in
+            self?.finishScrubSeek(at: time)
+        }
+        timeline.onCurrentTimeChanged = { [weak self] time in
+            self?.updateTimeLabel(for: time)
         }
         timeline.onScrubbingChanged = { [weak self] isScrubbing in
             guard let self else { return }
@@ -301,7 +324,7 @@ public final class VideoCutViewController: UIViewController {
     }
 
     private func normalizeCuts() {
-        cuts = VideoCutValidator.normalizedCuts(cuts, duration: CMTimeGetSeconds(asset.duration))
+        cuts = VideoCutValidator.clampedCuts(cuts, duration: CMTimeGetSeconds(asset.duration))
     }
 
     private func refreshData() {
@@ -351,7 +374,8 @@ public final class VideoCutViewController: UIViewController {
     }
 
     @objc private func playPauseTapped() {
-        previewSkipTarget = nil
+        previewCuts = []
+        isAdvancingFinalPreview = false
         if player.timeControlStatus == .playing {
             player.pause()
             interactionState = .idle
@@ -363,21 +387,50 @@ public final class VideoCutViewController: UIViewController {
     }
 
     @objc private func addCutTapped() {
-        let start = currentTime
-        let end = min(CMTimeGetSeconds(asset.duration), start + 5)
+        let duration = CMTimeGetSeconds(asset.duration)
+        guard duration.isFinite, duration > 0 else { return }
+
+        let defaultDuration = min(5, duration)
+        let center = timelineView?.currentTime ?? currentTime
+        var start = center - defaultDuration / 2
+        var end = center + defaultDuration / 2
+        if start < 0 {
+            end = min(duration, end - start)
+            start = 0
+        }
+        if end > duration {
+            start = max(0, start - (end - duration))
+            end = duration
+        }
         guard end > start else { return }
+
         cuts.append(VideoCut(startTime: start, endTime: end))
+        let newIndex = cuts.count - 1
         refreshData()
-        showEditor(for: cuts.count - 1)
+        timelineView?.selectedCutIndex = newIndex
+        timelineView?.scrollToCut(index: newIndex, animated: true)
+        showEditor(for: newIndex)
     }
 
     @objc private func previewFinalTapped() {
+        let duration = CMTimeGetSeconds(asset.duration)
+        previewCuts = VideoCutValidator.normalizedCuts(cuts, duration: duration)
+        guard let firstCut = previewCuts.first else {
+            presentAlert(title: "Nothing to Preview", message: "Add at least one valid cut first.")
+            return
+        }
+
+        player.pause()
+        previewCutIndex = 0
+        isAdvancingFinalPreview = true
         interactionState = .previewingFinal
-        previewSkipTarget = nil
-        seek(to: 0, precise: true)
-        timelineView?.setCurrentTime(0)
-        player.play()
-        updatePlayButton()
+        seek(to: firstCut.startTime, precise: true) { [weak self] finished in
+            guard let self, finished, self.interactionState == .previewingFinal else { return }
+            self.isAdvancingFinalPreview = false
+            self.timelineView?.setCurrentTime(firstCut.startTime)
+            self.player.play()
+            self.updatePlayButton()
+        }
     }
 
     @objc private func zoomOutTapped() {
@@ -431,8 +484,18 @@ public final class VideoCutViewController: UIViewController {
                     self.navigationItem.rightBarButtonItem?.isEnabled = true
                     switch result {
                     case .success(let url):
-                        self.onExportCompleted?(url)
-                        self.dismiss(animated: true)
+                        do {
+                            try await self.saveExportToPhotos(url)
+                            self.onExportCompleted?(url)
+                            self.presentAlert(
+                                title: "Saved",
+                                message: "The highlight video was saved to your Photos Library."
+                            ) {
+                                self.dismiss(animated: true)
+                            }
+                        } catch {
+                            self.presentAlert(title: "Save Error", message: error.localizedDescription)
+                        }
                     case .failure(let error):
                         self.presentAlert(title: "Export Error", message: error.localizedDescription)
                     }
@@ -449,16 +512,64 @@ public final class VideoCutViewController: UIViewController {
         navigationItem.rightBarButtonItem?.isEnabled = true
     }
 
-    private func seek(to time: TimeInterval, precise: Bool = true) {
+    private func seek(
+        to time: TimeInterval,
+        precise: Bool = true,
+        completion: (@MainActor @Sendable (Bool) -> Void)? = nil
+    ) {
         player.currentItem?.cancelPendingSeeks()
         let tolerance = precise
             ? CMTime.zero
-            : CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600)
+            : CMTime(seconds: 1.0 / 15.0, preferredTimescale: 600)
+        player.seek(
+            to: CMTime(seconds: time, preferredTimescale: 600),
+            toleranceBefore: tolerance,
+            toleranceAfter: tolerance,
+            completionHandler: { finished in
+                Task { @MainActor in completion?(finished) }
+            }
+        )
+    }
+
+    private func requestScrubSeek(to time: TimeInterval) {
+        pendingScrubTime = time
+        guard !scrubSeekInFlight else { return }
+        performNextScrubSeek()
+    }
+
+    private func performNextScrubSeek() {
+        guard let time = pendingScrubTime else {
+            scrubSeekInFlight = false
+            return
+        }
+
+        pendingScrubTime = nil
+        scrubSeekInFlight = true
+        let generation = scrubSeekGeneration
+        let tolerance = CMTime(seconds: 1.0 / 12.0, preferredTimescale: 600)
         player.seek(
             to: CMTime(seconds: time, preferredTimescale: 600),
             toleranceBefore: tolerance,
             toleranceAfter: tolerance
-        )
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, generation == self.scrubSeekGeneration else { return }
+                self.scrubSeekInFlight = false
+                self.performNextScrubSeek()
+            }
+        }
+    }
+
+    private func finishScrubSeek(at time: TimeInterval) {
+        scrubSeekGeneration += 1
+        pendingScrubTime = nil
+        scrubSeekInFlight = false
+        seek(to: time, precise: true)
+    }
+
+    private func updateTimeLabel(for time: TimeInterval) {
+        let duration = CMTimeGetSeconds(asset.duration)
+        timeLabel.text = "\(VideoCutFormatting.shortTime(time)) / \(VideoCutFormatting.shortTime(duration))"
     }
 
     private var currentTime: TimeInterval {
@@ -476,35 +587,71 @@ public final class VideoCutViewController: UIViewController {
         }
         updatePlayButton()
 
-        guard interactionState == .previewingFinal else { return }
+        guard interactionState == .previewingFinal,
+              previewCuts.indices.contains(previewCutIndex),
+              !isAdvancingFinalPreview else { return }
 
-        if let target = previewSkipTarget {
-            if playbackTime >= target - 0.02 {
-                previewSkipTarget = nil
-            }
+        let cut = previewCuts[previewCutIndex]
+        guard playbackTime >= cut.endTime - 0.02 else { return }
+
+        player.pause()
+        let nextIndex = previewCutIndex + 1
+        guard previewCuts.indices.contains(nextIndex) else {
+            interactionState = .idle
+            previewCuts = []
+            timelineView?.setCurrentTime(cut.endTime)
+            updatePlayButton()
             return
         }
 
-        if let cut = cuts.first(where: {
-            playbackTime >= $0.startTime && playbackTime < $0.endTime
-        }) {
-            previewSkipTarget = cut.endTime
-            seek(to: cut.endTime, precise: true)
-        } else if playbackTime >= duration - 0.02 {
-            interactionState = .idle
-            player.pause()
-            timelineView?.setCurrentTime(duration)
+        previewCutIndex = nextIndex
+        let nextCut = previewCuts[nextIndex]
+        isAdvancingFinalPreview = true
+        seek(to: nextCut.startTime, precise: true) { [weak self] finished in
+            guard let self, finished, self.interactionState == .previewingFinal else { return }
+            self.isAdvancingFinalPreview = false
+            self.timelineView?.setCurrentTime(nextCut.startTime)
+            self.player.play()
+            self.updatePlayButton()
         }
     }
 
     private func updatePlayButton() {
         let imageName = player.timeControlStatus == .playing ? "pause.fill" : "play.fill"
-        playPauseButton.setImage(UIImage(systemName: imageName), for: .normal)
+        playPauseButton.configuration?.image = UIImage(
+            systemName: imageName,
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        )
     }
 
-    private func presentAlert(title: String, message: String) {
+    private func saveExportToPhotos(_ url: URL) async throws {
+        let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+        switch status {
+        case .authorized, .limited:
+            break
+        case .denied:
+            throw PhotoSaveError.denied
+        case .restricted:
+            throw PhotoSaveError.restricted
+        case .notDetermined:
+            throw PhotoSaveError.notDetermined
+        @unknown default:
+            throw PhotoSaveError.unavailable
+        }
+
+        try await PHPhotoLibrary.shared().performChanges {
+            let request = PHAssetCreationRequest.forAsset()
+            request.addResource(with: .video, fileURL: url, options: nil)
+        }
+    }
+
+    private func presentAlert(
+        title: String,
+        message: String,
+        completion: (() -> Void)? = nil
+    ) {
         let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
-        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completion?() })
         present(alert, animated: true)
     }
 }
@@ -546,6 +693,26 @@ extension VideoCutViewController: UITableViewDataSource, UITableViewDelegate {
     }
 }
 
+private enum PhotoSaveError: LocalizedError {
+    case denied
+    case restricted
+    case notDetermined
+    case unavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .denied:
+            return "Photos access was denied. Enable Add Photos Only access in Settings and try again."
+        case .restricted:
+            return "Photos access is restricted on this device."
+        case .notDetermined:
+            return "Photos permission wasn’t resolved. Please try again."
+        case .unavailable:
+            return "The Photos Library isn’t available."
+        }
+    }
+}
+
 @MainActor
 private final class CutDetailViewController: UIViewController {
     var onCutChanged: ((VideoCut) -> Void)?
@@ -569,6 +736,9 @@ private final class CutDetailViewController: UIViewController {
     private let playerLayer = AVPlayerLayer()
     private var timeObserver: Any?
     private var interactionState: InteractionState = .idle
+    private var pendingScrubTime: TimeInterval?
+    private var scrubSeekInFlight = false
+    private var scrubSeekGeneration = 0
     private let videoContainer = UIView()
     private let playButton = UIButton(type: .system)
     private let timeLabel = UILabel()
@@ -643,10 +813,16 @@ private final class CutDetailViewController: UIViewController {
         playerLayer.videoGravity = .resizeAspect
         videoContainer.layer.addSublayer(playerLayer)
 
-        playButton.setImage(UIImage(systemName: "play.fill"), for: .normal)
-        playButton.tintColor = .white
-        playButton.backgroundColor = UIColor.black.withAlphaComponent(0.4)
-        playButton.layer.cornerRadius = 22
+        var playConfiguration = UIButton.Configuration.plain()
+        playConfiguration.image = UIImage(
+            systemName: "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
+        )
+        playConfiguration.baseForegroundColor = .white
+        playConfiguration.contentInsets = NSDirectionalEdgeInsets(top: 10, leading: 10, bottom: 10, trailing: 10)
+        playConfiguration.background.backgroundColor = UIColor.black.withAlphaComponent(0.4)
+        playConfiguration.background.cornerRadius = 22
+        playButton.configuration = playConfiguration
         playButton.addTarget(self, action: #selector(playTapped), for: .touchUpInside)
         playButton.translatesAutoresizingMaskIntoConstraints = false
         contentView.addSubview(playButton)
@@ -820,7 +996,14 @@ private final class CutDetailViewController: UIViewController {
         timeline.cuts = [cut]
         timeline.selectedCutIndex = 0
         timeline.onSeekRequested = { [weak self] time in
-            self?.seek(to: time, precise: false)
+            self?.requestScrubSeek(to: time)
+        }
+        timeline.onFinalSeekRequested = { [weak self] time in
+            self?.finishScrubSeek(at: time)
+        }
+        timeline.onCurrentTimeChanged = { [weak self] time in
+            guard let self else { return }
+            self.timeLabel.text = "\(VideoCutFormatting.shortTime(time)) / \(VideoCutFormatting.shortTime(CMTimeGetSeconds(self.asset.duration)))"
         }
         timeline.onInteractionChanged = { [weak self] interaction in
             guard let self else { return }
@@ -926,9 +1109,9 @@ private final class CutDetailViewController: UIViewController {
     }
 
     private func updatePlayButton() {
-        playButton.setImage(
-            UIImage(systemName: player.timeControlStatus == .playing ? "pause.fill" : "play.fill"),
-            for: .normal
+        playButton.configuration?.image = UIImage(
+            systemName: player.timeControlStatus == .playing ? "pause.fill" : "play.fill",
+            withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
         )
     }
 
@@ -936,12 +1119,48 @@ private final class CutDetailViewController: UIViewController {
         player.currentItem?.cancelPendingSeeks()
         let tolerance = precise
             ? CMTime.zero
-            : CMTime(seconds: 1.0 / 30.0, preferredTimescale: 600)
+            : CMTime(seconds: 1.0 / 15.0, preferredTimescale: 600)
         player.seek(
             to: CMTime(seconds: time, preferredTimescale: 600),
             toleranceBefore: tolerance,
             toleranceAfter: tolerance
         )
+    }
+
+    private func requestScrubSeek(to time: TimeInterval) {
+        pendingScrubTime = time
+        guard !scrubSeekInFlight else { return }
+        performNextScrubSeek()
+    }
+
+    private func performNextScrubSeek() {
+        guard let time = pendingScrubTime else {
+            scrubSeekInFlight = false
+            return
+        }
+
+        pendingScrubTime = nil
+        scrubSeekInFlight = true
+        let generation = scrubSeekGeneration
+        let tolerance = CMTime(seconds: 1.0 / 12.0, preferredTimescale: 600)
+        player.seek(
+            to: CMTime(seconds: time, preferredTimescale: 600),
+            toleranceBefore: tolerance,
+            toleranceAfter: tolerance
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, generation == self.scrubSeekGeneration else { return }
+                self.scrubSeekInFlight = false
+                self.performNextScrubSeek()
+            }
+        }
+    }
+
+    private func finishScrubSeek(at time: TimeInterval) {
+        scrubSeekGeneration += 1
+        pendingScrubTime = nil
+        scrubSeekInFlight = false
+        seek(to: time, precise: true)
     }
 
     private func parseTime(_ text: String) -> TimeInterval? {
