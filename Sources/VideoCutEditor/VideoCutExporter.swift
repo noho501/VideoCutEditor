@@ -25,6 +25,7 @@ public final class VideoCutExporter {
         }
     }
 
+    private let merger = VideoMerger()
     private var exportTask: Task<Void, Never>?
 
     public init() {}
@@ -35,6 +36,7 @@ public final class VideoCutExporter {
 
     public func cancel() {
         exportTask?.cancel()
+        merger.cancelMerge()
         exportTask = nil
     }
 
@@ -47,93 +49,74 @@ public final class VideoCutExporter {
     ) {
         cancel()
         exportTask = Task { [weak self] in
+            guard let self else { return }
+
+            var segmentURLs: [URL] = []
+            defer {
+                segmentURLs.forEach { VideoCutFileManager.remove($0) }
+                self.exportTask = nil
+            }
+
             do {
                 progress(0)
-                try await Self.performExport(
-                    sourceURL: sourceURL,
-                    cuts: cuts,
-                    outputURL: outputURL,
-                    progress: progress
+                let asset = AVURLAsset(url: sourceURL)
+                let duration = try await asset.load(.duration).seconds
+                let selectedCuts = VideoCutValidator.normalizedCuts(
+                    cuts,
+                    duration: duration
                 )
+                guard !selectedCuts.isEmpty else {
+                    throw ExportError.noOutputContent
+                }
+
+                let videoTracks = try await asset.loadTracks(withMediaType: .video)
+                guard !videoTracks.isEmpty else {
+                    throw ExportError.missingVideoTrack
+                }
+
+                for (index, cut) in selectedCuts.enumerated() {
+                    try Task.checkCancellation()
+                    let segmentURL = try VideoCutFileManager.makeOutputURL()
+                    segmentURLs.append(segmentURL)
+
+                    let baseProgress = Float(index) / Float(selectedCuts.count)
+                    let segmentWeight = 1 / Float(selectedCuts.count)
+                    try await Self.exportSegment(
+                        sourceURL: sourceURL,
+                        cut: cut,
+                        outputURL: segmentURL
+                    ) { value in
+                        progress((baseProgress + value * segmentWeight) * 0.65)
+                    }
+                }
+
+                try Task.checkCancellation()
+                let url = try await merger.mergeVideos(
+                    videoURLs: segmentURLs,
+                    outputURL: outputURL
+                ) { value in
+                    progress(0.65 + value * 0.35)
+                }
+
                 try Task.checkCancellation()
                 progress(1)
-                completion(.success(outputURL))
+                completion(.success(url))
             } catch {
                 VideoCutFileManager.remove(outputURL)
                 completion(.failure(error))
             }
-            self?.exportTask = nil
         }
     }
 
-    private nonisolated static func performExport(
+    private nonisolated static func exportSegment(
         sourceURL: URL,
-        cuts: [VideoCut],
+        cut: VideoCut,
         outputURL: URL,
         progress: @escaping @Sendable (Float) -> Void
     ) async throws {
         let asset = AVURLAsset(url: sourceURL)
-        let durationTime = try await asset.load(.duration)
-        let duration = durationTime.seconds
-        let selectedRanges = VideoCutValidator.normalizedCuts(cuts, duration: duration)
-        guard !selectedRanges.isEmpty else {
-            throw ExportError.noOutputContent
-        }
-
-        let videoTracks = try await asset.loadTracks(withMediaType: .video)
-        guard let sourceVideoTrack = videoTracks.first else {
-            throw ExportError.missingVideoTrack
-        }
-        let sourceAudioTracks = try await asset.loadTracks(withMediaType: .audio)
-
-        let composition = AVMutableComposition()
-        guard let destinationVideoTrack = composition.addMutableTrack(
-            withMediaType: .video,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw ExportError.missingVideoTrack
-        }
-        let destinationAudioTracks = sourceAudioTracks.map { _ in
-            composition.addMutableTrack(
-                withMediaType: .audio,
-                preferredTrackID: kCMPersistentTrackID_Invalid
-            )
-        }
-
-        var cursor = CMTime.zero
-        for cut in selectedRanges {
-            try Task.checkCancellation()
-            let timeRange = CMTimeRange(
-                start: CMTime(seconds: cut.startTime, preferredTimescale: 600),
-                end: CMTime(seconds: cut.endTime, preferredTimescale: 600)
-            )
-            try destinationVideoTrack.insertTimeRange(
-                timeRange,
-                of: sourceVideoTrack,
-                at: cursor
-            )
-
-            for (index, sourceAudioTrack) in sourceAudioTracks.enumerated() {
-                let sourceAudioRange = try await sourceAudioTrack.load(.timeRange)
-                let availableRange = CMTimeRangeGetIntersection(timeRange, otherRange: sourceAudioRange)
-                guard !availableRange.isEmpty else { continue }
-
-                let audioOffset = availableRange.start - timeRange.start
-                try destinationAudioTracks[index]?.insertTimeRange(
-                    availableRange,
-                    of: sourceAudioTrack,
-                    at: cursor + audioOffset
-                )
-            }
-            cursor = cursor + timeRange.duration
-        }
-
-        destinationVideoTrack.preferredTransform = try await sourceVideoTrack.load(
-            .preferredTransform
-        )
-
         guard let session = AVAssetExportSession(
-            asset: composition,
+            asset: asset,
             presetName: AVAssetExportPresetHighestQuality
         ) else {
             throw ExportError.cannotCreateExportSession
@@ -141,8 +124,22 @@ public final class VideoCutExporter {
         guard session.supportedFileTypes.contains(.mp4) else {
             throw ExportError.unsupportedOutputType
         }
+
+        VideoCutFileManager.remove(outputURL)
+        session.timeRange = CMTimeRange(
+            start: CMTime(seconds: cut.startTime, preferredTimescale: 600),
+            end: CMTime(seconds: cut.endTime, preferredTimescale: 600)
+        )
         session.shouldOptimizeForNetworkUse = true
 
+        try await export(session, to: outputURL, progress: progress)
+    }
+
+    private nonisolated static func export(
+        _ session: AVAssetExportSession,
+        to outputURL: URL,
+        progress: @escaping @Sendable (Float) -> Void
+    ) async throws {
         if #available(iOS 18.0, *) {
             let states = session.states(updateInterval: 0.1)
             let progressTask = Task {
@@ -153,14 +150,8 @@ public final class VideoCutExporter {
                     }
                 }
             }
-
-            do {
-                try await session.export(to: outputURL, as: .mp4)
-                progressTask.cancel()
-            } catch {
-                progressTask.cancel()
-                throw error
-            }
+            defer { progressTask.cancel() }
+            try await session.export(to: outputURL, as: .mp4)
         } else {
             session.outputURL = outputURL
             session.outputFileType = .mp4
@@ -171,10 +162,7 @@ public final class VideoCutExporter {
     private nonisolated static func legacyExport(
         _ session: AVAssetExportSession
     ) async throws {
-        // iOS 15 only exposes a @Sendable callback for a non-Sendable session.
-        // The box is safe because this function owns the configured session and
-        // reads it only after AVFoundation invokes its completion callback.
-        let box = LegacyExportSessionBox(session)
+        let box = ExportSessionBox(session)
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 box.session.exportAsynchronously {
@@ -196,7 +184,7 @@ public final class VideoCutExporter {
     }
 }
 
-private final class LegacyExportSessionBox: @unchecked Sendable {
+private final class ExportSessionBox: @unchecked Sendable {
     let session: AVAssetExportSession
 
     init(_ session: AVAssetExportSession) {
