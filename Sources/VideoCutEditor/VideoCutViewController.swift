@@ -28,6 +28,12 @@ public final class VideoCutViewController: UIViewController {
     private var previewCuts: [VideoCut] = []
     private var previewCutIndex = 0
     private var isAdvancingFinalPreview = false
+    private var transitionSettings = VideoTransitionSettings()
+    private var previewBuildTask: Task<Void, Never>?
+    private var previewItemStatusObservation: NSKeyValueObservation?
+    private var isUsingFinalPreviewItem = false
+    private var finalPreviewDuration: TimeInterval = 0
+    private var finalPreviewURL: URL?
     private var pendingScrubTime: TimeInterval?
     private var scrubSeekInFlight = false
     private var scrubSeekGeneration = 0
@@ -42,6 +48,10 @@ public final class VideoCutViewController: UIViewController {
     private let previewButton = UIButton(type: .system)
     private let zoomOutButton = UIButton(type: .system)
     private let zoomInButton = UIButton(type: .system)
+    private let transitionButton = UIButton(type: .system)
+    private let transitionDurationSlider = UISlider()
+    private let transitionDurationLabel = UILabel()
+    private let transitionControls = UIStackView()
     private let cutsTableView = UITableView(frame: .zero, style: .plain)
     private let progressContainer = UIStackView()
     private let progressView = UIProgressView(progressViewStyle: .default)
@@ -69,6 +79,12 @@ public final class VideoCutViewController: UIViewController {
         player.pause()
         removeTimeObserver()
         timelineView?.cancelThumbnailLoading()
+        previewBuildTask?.cancel()
+        previewItemStatusObservation?.invalidate()
+        if let finalPreviewURL {
+            VideoCutFileManager.remove(finalPreviewURL)
+            self.finalPreviewURL = nil
+        }
         if interactionState == .exporting {
             exporter.cancel()
         }
@@ -112,6 +128,7 @@ public final class VideoCutViewController: UIViewController {
 
         configurePlayerControls()
         configureActionButtons()
+        configureTransitionControls()
 
         timelineContainer.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(timelineContainer)
@@ -150,7 +167,12 @@ public final class VideoCutViewController: UIViewController {
             timelineContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
             timelineContainer.heightAnchor.constraint(equalToConstant: 72),
 
-            addCutButton.topAnchor.constraint(equalTo: timelineContainer.bottomAnchor, constant: 14),
+            transitionControls.topAnchor.constraint(equalTo: timelineContainer.bottomAnchor, constant: 10),
+            transitionControls.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 20),
+            transitionControls.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -20),
+            transitionControls.heightAnchor.constraint(equalToConstant: 44),
+
+            addCutButton.topAnchor.constraint(equalTo: transitionControls.bottomAnchor, constant: 10),
             addCutButton.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 24),
             addCutButton.heightAnchor.constraint(equalToConstant: 48),
             addCutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
@@ -243,6 +265,70 @@ public final class VideoCutViewController: UIViewController {
 
         configureZoomButton(zoomOutButton, imageName: "minus.magnifyingglass", action: #selector(zoomOutTapped))
         configureZoomButton(zoomInButton, imageName: "plus.magnifyingglass", action: #selector(zoomInTapped))
+    }
+
+    private func configureTransitionControls() {
+        transitionButton.configuration = .bordered()
+        transitionButton.configuration?.title = transitionSettings.transition.rawValue
+        transitionButton.configuration?.image = UIImage(systemName: "rectangle.2.swap")
+        transitionButton.configuration?.imagePadding = 6
+        transitionButton.configuration?.baseForegroundColor = .white
+        transitionButton.configuration?.cornerStyle = .capsule
+        transitionButton.showsMenuAsPrimaryAction = true
+        updateTransitionMenu()
+
+        transitionDurationSlider.minimumValue = 0.1
+        transitionDurationSlider.maximumValue = 2
+        transitionDurationSlider.value = Float(transitionSettings.duration)
+        transitionDurationSlider.minimumValueImage = UIImage(systemName: "timer")
+        transitionDurationSlider.tintColor = .systemYellow
+        transitionDurationSlider.addTarget(
+            self,
+            action: #selector(transitionDurationChanged),
+            for: .valueChanged
+        )
+
+        transitionDurationLabel.textColor = .white
+        transitionDurationLabel.font = .monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
+        transitionDurationLabel.textAlignment = .right
+        transitionDurationLabel.widthAnchor.constraint(equalToConstant: 42).isActive = true
+        updateTransitionDurationUI()
+
+        transitionControls.axis = .horizontal
+        transitionControls.alignment = .center
+        transitionControls.spacing = 10
+        transitionControls.addArrangedSubview(transitionButton)
+        transitionControls.addArrangedSubview(transitionDurationSlider)
+        transitionControls.addArrangedSubview(transitionDurationLabel)
+        transitionControls.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(transitionControls)
+    }
+
+    private func updateTransitionMenu() {
+        transitionButton.menu = UIMenu(children: VideoTransition.allCases.map { transition in
+            UIAction(
+                title: transition.rawValue,
+                state: transition == transitionSettings.transition ? .on : .off
+            ) { [weak self] _ in
+                guard let self else { return }
+                self.transitionSettings.transition = transition
+                self.transitionButton.configuration?.title = transition.rawValue
+                self.updateTransitionMenu()
+                self.updateTransitionDurationUI()
+            }
+        })
+    }
+
+    @objc private func transitionDurationChanged() {
+        transitionSettings.duration = TimeInterval(transitionDurationSlider.value)
+        updateTransitionDurationUI()
+    }
+
+    private func updateTransitionDurationUI() {
+        let enabled = transitionSettings.transition != .none
+        transitionDurationSlider.isEnabled = enabled
+        transitionDurationLabel.text = String(format: "%.1fs", transitionSettings.duration)
+        transitionDurationLabel.alpha = enabled ? 1 : 0.45
     }
 
     private func configureZoomButton(_ button: UIButton, imageName: String, action: Selector) {
@@ -414,22 +500,95 @@ public final class VideoCutViewController: UIViewController {
 
     @objc private func previewFinalTapped() {
         let duration = CMTimeGetSeconds(asset.duration)
-        previewCuts = VideoCutValidator.normalizedCuts(cuts, duration: duration)
-        guard let firstCut = previewCuts.first else {
+        let selectedCuts = VideoCutValidator.normalizedCuts(cuts, duration: duration)
+        guard !selectedCuts.isEmpty else {
             presentAlert(title: "Nothing to Preview", message: "Add at least one valid cut first.")
             return
         }
 
         player.pause()
-        previewCutIndex = 0
-        isAdvancingFinalPreview = true
-        interactionState = .previewingFinal
-        seek(to: firstCut.startTime, precise: true) { [weak self] finished in
-            guard let self, finished, self.interactionState == .previewingFinal else { return }
-            self.isAdvancingFinalPreview = false
-            self.timelineView?.setCurrentTime(firstCut.startTime)
-            self.player.play()
-            self.updatePlayButton()
+        previewBuildTask?.cancel()
+        previewButton.isEnabled = false
+        previewBuildTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                let clips = selectedCuts.map { cut in
+                    TransitionClip(
+                        asset: self.asset,
+                        timeRange: CMTimeRange(
+                            start: CMTime(seconds: cut.startTime, preferredTimescale: 600),
+                            end: CMTime(seconds: cut.endTime, preferredTimescale: 600)
+                        )
+                    )
+                }
+                let result = try await TransitionCompositionBuilder.build(
+                    clips: clips,
+                    settings: self.transitionSettings
+                )
+                try Task.checkCancellation()
+
+                let previewURL = try VideoCutFileManager.makeOutputURL()
+                do {
+                    try await Self.renderPreview(
+                        result,
+                        outputURL: previewURL
+                    )
+                } catch {
+                    VideoCutFileManager.remove(previewURL)
+                    throw error
+                }
+                if Task.isCancelled {
+                    VideoCutFileManager.remove(previewURL)
+                    throw CancellationError()
+                }
+
+                if let previousURL = self.finalPreviewURL {
+                    VideoCutFileManager.remove(previousURL)
+                }
+                self.finalPreviewURL = previewURL
+                let item = AVPlayerItem(url: previewURL)
+                self.previewItemStatusObservation?.invalidate()
+                self.previewItemStatusObservation = item.observe(
+                    \.status,
+                    options: [.initial, .new]
+                ) { [weak self, weak item] _, _ in
+                    Task { @MainActor in
+                        guard let self, let item else { return }
+                        switch item.status {
+                        case .readyToPlay:
+                            self.previewItemStatusObservation?.invalidate()
+                            self.previewItemStatusObservation = nil
+                            guard self.interactionState == .previewingFinal else { return }
+                            self.player.play()
+                            self.updatePlayButton()
+                        case .failed:
+                            self.previewItemStatusObservation?.invalidate()
+                            self.previewItemStatusObservation = nil
+                            self.interactionState = .idle
+                            self.presentAlert(
+                                title: "Preview Error",
+                                message: item.error?.localizedDescription
+                                    ?? "The transition preview couldn’t be prepared."
+                            )
+                        case .unknown:
+                            break
+                        @unknown default:
+                            break
+                        }
+                    }
+                }
+                self.player.replaceCurrentItem(with: item)
+                self.isUsingFinalPreviewItem = true
+                self.finalPreviewDuration = result.composition.duration.seconds
+                self.interactionState = .previewingFinal
+                self.updatePlayButton()
+            } catch is CancellationError {
+                // A newer preview request superseded this build.
+            } catch {
+                self.presentAlert(title: "Preview Error", message: error.localizedDescription)
+            }
+            self.previewButton.isEnabled = true
+            self.previewBuildTask = nil
         }
     }
 
@@ -471,6 +630,7 @@ public final class VideoCutViewController: UIViewController {
         exporter.export(
             sourceURL: videoURL,
             cuts: cuts,
+            transitionSettings: transitionSettings,
             outputURL: outputURL,
             progress: { [weak self] value in
                 Task { @MainActor in self?.progressView.progress = value }
@@ -533,6 +693,7 @@ public final class VideoCutViewController: UIViewController {
     }
 
     private func requestScrubSeek(to time: TimeInterval) {
+        restoreSourcePlayerIfNeeded(at: time)
         pendingScrubTime = time
         guard !scrubSeekInFlight else { return }
         performNextScrubSeek()
@@ -579,42 +740,41 @@ public final class VideoCutViewController: UIViewController {
     }
 
     private func refreshPlaybackUI() {
-        let duration = CMTimeGetSeconds(asset.duration)
         let playbackTime = currentTime
-        timeLabel.text = "\(VideoCutFormatting.shortTime(playbackTime)) / \(VideoCutFormatting.shortTime(duration))"
 
-        if interactionState != .userScrubbing {
-            timelineView?.updatePlayhead(currentTime: playbackTime)
-        }
-        updatePlayButton()
-
-        guard interactionState == .previewingFinal,
-              previewCuts.indices.contains(previewCutIndex),
-              !isAdvancingFinalPreview else { return }
-
-        let cut = previewCuts[previewCutIndex]
-        guard playbackTime >= cut.endTime - 0.02 else { return }
-
-        player.pause()
-        let nextIndex = previewCutIndex + 1
-        guard previewCuts.indices.contains(nextIndex) else {
-            interactionState = .idle
-            previewCuts = []
-            timelineView?.setCurrentTime(cut.endTime)
+        if interactionState == .previewingFinal {
+            timeLabel.text = "\(VideoCutFormatting.shortTime(playbackTime)) / \(VideoCutFormatting.shortTime(finalPreviewDuration))"
+            if finalPreviewDuration > 0,
+               playbackTime >= finalPreviewDuration - 0.02 {
+                player.pause()
+                interactionState = .idle
+            }
             updatePlayButton()
             return
         }
 
-        previewCutIndex = nextIndex
-        let nextCut = previewCuts[nextIndex]
-        isAdvancingFinalPreview = true
-        seek(to: nextCut.startTime, precise: true) { [weak self] finished in
-            guard let self, finished, self.interactionState == .previewingFinal else { return }
-            self.isAdvancingFinalPreview = false
-            self.timelineView?.setCurrentTime(nextCut.startTime)
-            self.player.play()
-            self.updatePlayButton()
+        let duration = CMTimeGetSeconds(asset.duration)
+        timeLabel.text = "\(VideoCutFormatting.shortTime(playbackTime)) / \(VideoCutFormatting.shortTime(duration))"
+        if interactionState != .userScrubbing {
+            timelineView?.updatePlayhead(currentTime: playbackTime)
         }
+        updatePlayButton()
+    }
+
+    private func restoreSourcePlayerIfNeeded(at time: TimeInterval) {
+        guard isUsingFinalPreviewItem else { return }
+        player.pause()
+        previewItemStatusObservation?.invalidate()
+        previewItemStatusObservation = nil
+        player.replaceCurrentItem(with: AVPlayerItem(asset: asset))
+        isUsingFinalPreviewItem = false
+        finalPreviewDuration = 0
+        if let finalPreviewURL {
+            VideoCutFileManager.remove(finalPreviewURL)
+            self.finalPreviewURL = nil
+        }
+        interactionState = .userScrubbing
+        seek(to: time, precise: false)
     }
 
     private func updatePlayButton() {
@@ -623,6 +783,57 @@ public final class VideoCutViewController: UIViewController {
             systemName: imageName,
             withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .semibold)
         )
+    }
+
+    private nonisolated static func renderPreview(
+        _ result: TransitionComposition,
+        outputURL: URL
+    ) async throws {
+        let preset = AVAssetExportPreset1280x720
+        guard let session = AVAssetExportSession(
+            asset: result.composition,
+            presetName: preset
+        ) ?? AVAssetExportSession(
+            asset: result.composition,
+            presetName: AVAssetExportPresetHighestQuality
+        ) else {
+            throw VideoCutExporter.ExportError.cannotCreateExportSession
+        }
+        guard session.supportedFileTypes.contains(.mp4) else {
+            throw VideoCutExporter.ExportError.unsupportedOutputType
+        }
+
+        session.videoComposition = result.videoComposition
+        session.audioMix = result.audioMix
+        session.shouldOptimizeForNetworkUse = true
+        VideoCutFileManager.remove(outputURL)
+
+        if #available(iOS 18.0, *) {
+            try await session.export(to: outputURL, as: .mp4)
+        } else {
+            session.outputURL = outputURL
+            session.outputFileType = .mp4
+            let box = PreviewExportSessionBox(session)
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    box.session.exportAsynchronously {
+                        switch box.session.status {
+                        case .completed:
+                            continuation.resume()
+                        case .cancelled:
+                            continuation.resume(throwing: CancellationError())
+                        default:
+                            continuation.resume(
+                                throwing: box.session.error
+                                    ?? VideoCutExporter.ExportError.cannotCreateExportSession
+                            )
+                        }
+                    }
+                }
+            } onCancel: {
+                box.session.cancelExport()
+            }
+        }
     }
 
     private func saveExportToPhotos(_ url: URL) async throws {
@@ -695,6 +906,14 @@ extension VideoCutViewController: UITableViewDataSource, UITableViewDelegate {
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         showEditor(for: indexPath.row)
+    }
+}
+
+private final class PreviewExportSessionBox: @unchecked Sendable {
+    let session: AVAssetExportSession
+
+    init(_ session: AVAssetExportSession) {
+        self.session = session
     }
 }
 

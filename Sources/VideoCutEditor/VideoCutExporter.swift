@@ -47,6 +47,24 @@ public final class VideoCutExporter {
         progress: @escaping @Sendable (Float) -> Void,
         completion: @escaping @Sendable (Result<URL, Error>) -> Void
     ) {
+        export(
+            sourceURL: sourceURL,
+            cuts: cuts,
+            transitionSettings: VideoTransitionSettings(),
+            outputURL: outputURL,
+            progress: progress,
+            completion: completion
+        )
+    }
+
+    public func export(
+        sourceURL: URL,
+        cuts: [VideoCut],
+        transitionSettings: VideoTransitionSettings,
+        outputURL: URL,
+        progress: @escaping @Sendable (Float) -> Void,
+        completion: @escaping @Sendable (Result<URL, Error>) -> Void
+    ) {
         cancel()
         exportTask = Task { [weak self] in
             guard let self else { return }
@@ -93,7 +111,8 @@ public final class VideoCutExporter {
                 try Task.checkCancellation()
                 let url = try await merger.mergeVideos(
                     videoURLs: segmentURLs,
-                    outputURL: outputURL
+                    outputURL: outputURL,
+                    transitionSettings: transitionSettings
                 ) { value in
                     progress(0.65 + value * 0.35)
                 }

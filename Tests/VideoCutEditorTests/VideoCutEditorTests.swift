@@ -60,14 +60,14 @@ import Testing
     ])
 }
 
-@Test func clampedCutsSupportMoreThanThirtyDistinctEntries() {
-    let cuts = (0..<35).map {
+@Test func clampedCutsSupportMoreThanFiftyDistinctEntries() {
+    let cuts = (0..<55).map {
         VideoCut(startTime: Double($0), endTime: Double($0) + 0.75)
     }
 
     let result = VideoCutValidator.clampedCuts(cuts, duration: 60)
 
-    #expect(result.count == 35)
+    #expect(result.count == 55)
     #expect(result.first == cuts.first)
     #expect(result.last == cuts.last)
 }

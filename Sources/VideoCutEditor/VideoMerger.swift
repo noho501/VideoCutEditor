@@ -8,7 +8,6 @@ final class VideoMerger {
     enum MergeError: LocalizedError {
         case insufficientDiskSpace
         case noValidVideo
-        case missingVideoTrack
         case cannotCreateExportSession
         case unsupportedOutputType
 
@@ -18,8 +17,6 @@ final class VideoMerger {
                 return "There isn’t enough free disk space to merge the selected clips."
             case .noValidVideo:
                 return "There are no valid video clips to merge."
-            case .missingVideoTrack:
-                return "A clip doesn’t contain a video track."
             case .cannotCreateExportSession:
                 return "The merged video export session couldn’t be created."
             case .unsupportedOutputType:
@@ -33,6 +30,7 @@ final class VideoMerger {
     func mergeVideos(
         videoURLs: [URL],
         outputURL: URL,
+        transitionSettings: VideoTransitionSettings,
         progress: @escaping @Sendable (Float) -> Void
     ) async throws -> URL {
         guard !videoURLs.isEmpty else {
@@ -42,85 +40,30 @@ final class VideoMerger {
             throw MergeError.insufficientDiskSpace
         }
 
-        let composition = AVMutableComposition()
-        guard let destinationVideoTrack = composition.addMutableTrack(
-            withMediaType: .video,
-            preferredTrackID: kCMPersistentTrackID_Invalid
-        ) else {
-            throw MergeError.missingVideoTrack
-        }
-
-        var destinationAudioTrack: AVMutableCompositionTrack?
-        var cursor = CMTime.zero
-        var preferredTransform: CGAffineTransform?
-
+        var clips: [TransitionClip] = []
+        clips.reserveCapacity(videoURLs.count)
         for url in videoURLs {
             try Task.checkCancellation()
-
             let asset = AVURLAsset(url: url)
             let duration = try await asset.load(.duration)
-            guard duration.isValid, duration.isNumeric, duration > .zero else {
-                continue
-            }
-
-            let videoTracks = try await asset.loadTracks(withMediaType: .video)
-            guard let sourceVideoTrack = videoTracks.first else {
-                throw MergeError.missingVideoTrack
-            }
-
-            let sourceVideoRange = try await sourceVideoTrack.load(.timeRange)
-            let requestedRange = CMTimeRange(start: .zero, duration: duration)
-            let videoRange = CMTimeRangeGetIntersection(
-                requestedRange,
-                otherRange: sourceVideoRange
-            )
-            guard !videoRange.isEmpty else { continue }
-
-            if preferredTransform == nil {
-                preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
-            }
-
-            try destinationVideoTrack.insertTimeRange(
-                videoRange,
-                of: sourceVideoTrack,
-                at: cursor
-            )
-
-            if let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first {
-                if destinationAudioTrack == nil {
-                    destinationAudioTrack = composition.addMutableTrack(
-                        withMediaType: .audio,
-                        preferredTrackID: kCMPersistentTrackID_Invalid
-                    )
-                }
-
-                let sourceAudioRange = try await sourceAudioTrack.load(.timeRange)
-                let audioRange = CMTimeRangeGetIntersection(
-                    videoRange,
-                    otherRange: sourceAudioRange
-                )
-                if !audioRange.isEmpty {
-                    let audioOffset = audioRange.start - videoRange.start
-                    try destinationAudioTrack?.insertTimeRange(
-                        audioRange,
-                        of: sourceAudioTrack,
-                        at: cursor + audioOffset
-                    )
-                }
-            }
-
-            cursor = cursor + videoRange.duration
+            guard duration.isValid, duration.isNumeric, duration > .zero else { continue }
+            clips.append(TransitionClip(
+                asset: asset,
+                timeRange: CMTimeRange(start: .zero, duration: duration)
+            ))
         }
-
-        guard cursor > .zero else {
+        guard !clips.isEmpty else {
             throw MergeError.noValidVideo
         }
 
-        destinationVideoTrack.preferredTransform = preferredTransform ?? .identity
+        let result = try await TransitionCompositionBuilder.build(
+            clips: clips,
+            settings: transitionSettings
+        )
         VideoCutFileManager.remove(outputURL)
 
         guard let session = AVAssetExportSession(
-            asset: composition,
+            asset: result.composition,
             presetName: AVAssetExportPresetHighestQuality
         ) else {
             throw MergeError.cannotCreateExportSession
@@ -129,6 +72,8 @@ final class VideoMerger {
             throw MergeError.unsupportedOutputType
         }
 
+        session.videoComposition = result.videoComposition
+        session.audioMix = result.audioMix
         session.shouldOptimizeForNetworkUse = true
         session.canPerformMultiplePassesOverSourceMediaData = true
         exportSession = session
