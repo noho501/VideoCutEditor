@@ -56,6 +56,10 @@ public final class VideoCutViewController: UIViewController {
     private let progressContainer = UIStackView()
     private let progressView = UIProgressView(progressViewStyle: .default)
     private let cancelExportButton = UIButton(type: .system)
+    private var compactLayoutConstraints: [NSLayoutConstraint] = []
+    private var wideLayoutConstraints: [NSLayoutConstraint] = []
+    private var videoAspectConstraint: NSLayoutConstraint?
+    private var isUsingWideLayout = false
 
     public init(videoURL: URL, cuts: [VideoCut]) {
         self.videoURL = videoURL
@@ -72,6 +76,7 @@ public final class VideoCutViewController: UIViewController {
         setupUI()
         configurePlayer()
         configureTimeline()
+        loadVideoAspectRatio()
     }
 
     public override func viewDidDisappear(_ animated: Bool) {
@@ -101,6 +106,7 @@ public final class VideoCutViewController: UIViewController {
 
     public override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateAdaptiveLayout(for: view.bounds.size)
         playerLayer.frame = videoContainer.bounds
     }
 
@@ -156,52 +162,108 @@ public final class VideoCutViewController: UIViewController {
         view.addSubview(progressContainer)
 
         let safe = view.safeAreaLayoutGuide
-        NSLayoutConstraint.activate([
+        videoAspectConstraint = videoContainer.heightAnchor.constraint(
+            equalTo: videoContainer.widthAnchor,
+            multiplier: 9.0 / 16.0
+        )
+        videoAspectConstraint?.isActive = true
+
+        let compactVideoWidth = videoContainer.widthAnchor.constraint(equalTo: safe.widthAnchor)
+        compactVideoWidth.priority = .defaultHigh
+        compactLayoutConstraints = [
             videoContainer.topAnchor.constraint(equalTo: safe.topAnchor),
-            videoContainer.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            videoContainer.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            videoContainer.heightAnchor.constraint(equalTo: videoContainer.widthAnchor, multiplier: 9.0 / 16.0),
+            videoContainer.centerXAnchor.constraint(equalTo: safe.centerXAnchor),
+            videoContainer.widthAnchor.constraint(lessThanOrEqualTo: safe.widthAnchor),
+            videoContainer.heightAnchor.constraint(lessThanOrEqualTo: safe.heightAnchor, multiplier: 0.42),
+            compactVideoWidth,
+            timelineContainer.topAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: 12),
+            timelineContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            timelineContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            transitionControls.topAnchor.constraint(equalTo: timelineContainer.bottomAnchor, constant: 8),
+            transitionControls.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            transitionControls.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            addCutButton.topAnchor.constraint(equalTo: transitionControls.bottomAnchor, constant: 8),
+            addCutButton.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            previewButton.trailingAnchor.constraint(lessThanOrEqualTo: safe.trailingAnchor, constant: -12),
+            cutsTableView.topAnchor.constraint(equalTo: addCutButton.bottomAnchor, constant: 8),
+            cutsTableView.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            cutsTableView.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            cutsTableView.bottomAnchor.constraint(equalTo: safe.bottomAnchor)
+        ]
 
-            timelineContainer.topAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: 54),
-            timelineContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
-            timelineContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
+        let wideVideoWidth = videoContainer.widthAnchor.constraint(equalTo: safe.widthAnchor, multiplier: 0.58)
+        wideVideoWidth.priority = .defaultHigh
+        wideLayoutConstraints = [
+            videoContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 12),
+            videoContainer.centerYAnchor.constraint(equalTo: safe.centerYAnchor),
+            videoContainer.topAnchor.constraint(greaterThanOrEqualTo: safe.topAnchor, constant: 8),
+            videoContainer.bottomAnchor.constraint(lessThanOrEqualTo: safe.bottomAnchor, constant: -8),
+            wideVideoWidth,
+            timelineContainer.topAnchor.constraint(equalTo: safe.topAnchor, constant: 8),
+            timelineContainer.leadingAnchor.constraint(equalTo: videoContainer.trailingAnchor, constant: 12),
+            timelineContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -12),
+            transitionControls.topAnchor.constraint(equalTo: timelineContainer.bottomAnchor, constant: 8),
+            transitionControls.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
+            transitionControls.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
+            addCutButton.topAnchor.constraint(equalTo: transitionControls.bottomAnchor, constant: 8),
+            addCutButton.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
+            previewButton.trailingAnchor.constraint(lessThanOrEqualTo: timelineContainer.trailingAnchor),
+            cutsTableView.topAnchor.constraint(equalTo: addCutButton.bottomAnchor, constant: 8),
+            cutsTableView.leadingAnchor.constraint(equalTo: timelineContainer.leadingAnchor),
+            cutsTableView.trailingAnchor.constraint(equalTo: timelineContainer.trailingAnchor),
+            cutsTableView.bottomAnchor.constraint(equalTo: safe.bottomAnchor)
+        ]
+
+        NSLayoutConstraint.activate([
             timelineContainer.heightAnchor.constraint(equalToConstant: 72),
-
-            transitionControls.topAnchor.constraint(equalTo: timelineContainer.bottomAnchor, constant: 10),
-            transitionControls.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 20),
-            transitionControls.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -20),
             transitionControls.heightAnchor.constraint(equalToConstant: 44),
-
-            addCutButton.topAnchor.constraint(equalTo: transitionControls.bottomAnchor, constant: 10),
-            addCutButton.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 24),
             addCutButton.heightAnchor.constraint(equalToConstant: 48),
-            addCutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 120),
-
+            addCutButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112),
             zoomOutButton.centerYAnchor.constraint(equalTo: addCutButton.centerYAnchor),
-            zoomOutButton.leadingAnchor.constraint(equalTo: addCutButton.trailingAnchor, constant: 8),
+            zoomOutButton.trailingAnchor.constraint(equalTo: zoomInButton.leadingAnchor, constant: -8),
             zoomOutButton.widthAnchor.constraint(equalToConstant: 44),
             zoomOutButton.heightAnchor.constraint(equalToConstant: 44),
-
             zoomInButton.centerYAnchor.constraint(equalTo: addCutButton.centerYAnchor),
-            zoomInButton.leadingAnchor.constraint(equalTo: zoomOutButton.trailingAnchor, constant: 8),
+            zoomInButton.trailingAnchor.constraint(equalTo: previewButton.leadingAnchor, constant: -8),
             zoomInButton.widthAnchor.constraint(equalToConstant: 44),
             zoomInButton.heightAnchor.constraint(equalToConstant: 44),
-
             previewButton.centerYAnchor.constraint(equalTo: addCutButton.centerYAnchor),
-            previewButton.leadingAnchor.constraint(equalTo: zoomInButton.trailingAnchor, constant: 8),
-            previewButton.trailingAnchor.constraint(lessThanOrEqualTo: safe.trailingAnchor, constant: -20),
             previewButton.heightAnchor.constraint(equalToConstant: 44),
             previewButton.widthAnchor.constraint(equalToConstant: 44),
-
-            cutsTableView.topAnchor.constraint(equalTo: addCutButton.bottomAnchor, constant: 10),
-            cutsTableView.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 16),
-            cutsTableView.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -16),
-            cutsTableView.bottomAnchor.constraint(equalTo: safe.bottomAnchor),
-
             progressContainer.leadingAnchor.constraint(equalTo: safe.leadingAnchor, constant: 24),
             progressContainer.trailingAnchor.constraint(equalTo: safe.trailingAnchor, constant: -24),
             progressContainer.bottomAnchor.constraint(equalTo: safe.bottomAnchor, constant: -12)
         ])
+        updateAdaptiveLayout(for: view.bounds.size, force: true)
+    }
+
+    private func updateAdaptiveLayout(for size: CGSize, force: Bool = false) {
+        guard !compactLayoutConstraints.isEmpty else { return }
+        let useWideLayout = size.width >= 700 && size.width > size.height * 1.15
+        guard force || useWideLayout != isUsingWideLayout else { return }
+        isUsingWideLayout = useWideLayout
+        NSLayoutConstraint.deactivate(useWideLayout ? compactLayoutConstraints : wideLayoutConstraints)
+        NSLayoutConstraint.activate(useWideLayout ? wideLayoutConstraints : compactLayoutConstraints)
+        cutsTableView.rowHeight = useWideLayout ? 76 : 88
+    }
+
+    private func loadVideoAspectRatio() {
+        Task { [weak self, asset] in
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let naturalSize = try? await track.load(.naturalSize),
+                  let transform = try? await track.load(.preferredTransform) else { return }
+            let transformedSize = naturalSize.applying(transform)
+            let width = abs(transformedSize.width)
+            let height = abs(transformedSize.height)
+            guard width > 0, height > 0, let self else { return }
+            self.videoAspectConstraint?.isActive = false
+            self.videoAspectConstraint = self.videoContainer.heightAnchor.constraint(
+                equalTo: self.videoContainer.widthAnchor,
+                multiplier: height / width
+            )
+            self.videoAspectConstraint?.isActive = true
+            self.view.setNeedsLayout()
+        }
     }
 
     private func configurePlayerControls() {
@@ -229,12 +291,13 @@ public final class VideoCutViewController: UIViewController {
         view.addSubview(timeLabel)
 
         NSLayoutConstraint.activate([
-            playPauseButton.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor, constant: 20),
+            playPauseButton.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor, constant: -20),
             playPauseButton.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: -12),
             playPauseButton.widthAnchor.constraint(equalToConstant: 44),
             playPauseButton.heightAnchor.constraint(equalToConstant: 44),
-            timeLabel.leadingAnchor.constraint(equalTo: playPauseButton.trailingAnchor, constant: 12),
-            timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor)
+            timeLabel.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor, constant: 20),
+            timeLabel.centerYAnchor.constraint(equalTo: playPauseButton.centerYAnchor),
+            timeLabel.trailingAnchor.constraint(lessThanOrEqualTo: playPauseButton.leadingAnchor, constant: -12)
         ])
     }
 
@@ -248,6 +311,8 @@ public final class VideoCutViewController: UIViewController {
         addCutButton.layer.borderColor = UIColor.white.withAlphaComponent(0.45).cgColor
         addCutButton.layer.borderWidth = 1
         addCutButton.layer.cornerRadius = 24
+        addCutButton.titleLabel?.lineBreakMode = .byClipping
+        addCutButton.setContentCompressionResistancePriority(.required, for: .horizontal)
         addCutButton.addTarget(self, action: #selector(addCutTapped), for: .touchUpInside)
         addCutButton.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(addCutButton)
@@ -895,11 +960,14 @@ extension VideoCutViewController: UITableViewDataSource, UITableViewDelegate {
         cell.contentConfiguration = configuration
         cell.accessoryType = .disclosureIndicator
         cell.tintColor = .systemYellow
-        cell.backgroundColor = UIColor.white.withAlphaComponent(0.055)
-        cell.layer.cornerRadius = 14
-        cell.layer.borderWidth = 1
-        cell.layer.borderColor = UIColor.white.withAlphaComponent(0.08).cgColor
-        cell.clipsToBounds = true
+        cell.backgroundColor = .clear
+        var background = UIBackgroundConfiguration.clear()
+        background.backgroundColor = UIColor.white.withAlphaComponent(0.055)
+        background.cornerRadius = 14
+        background.strokeColor = UIColor.white.withAlphaComponent(0.08)
+        background.strokeWidth = 1
+        background.backgroundInsets = NSDirectionalEdgeInsets(top: 2, leading: 0, bottom: 8, trailing: 0)
+        cell.backgroundConfiguration = background
         return cell
     }
 
@@ -971,6 +1039,10 @@ private final class CutDetailViewController: UIViewController {
     private let startField = UITextField()
     private let endField = UITextField()
     private let durationLabel = UILabel()
+    private var videoAspectConstraint: NSLayoutConstraint?
+    private var compactPreviewHeightConstraint: NSLayoutConstraint?
+    private var widePreviewHeightConstraint: NSLayoutConstraint?
+    private var isUsingWideDetailLayout = false
 
     init(asset: AVAsset, cut: VideoCut, cutIndex: Int, totalCount: Int) {
         self.asset = asset
@@ -987,6 +1059,7 @@ private final class CutDetailViewController: UIViewController {
         setupUI()
         configurePlayer()
         configureTimeline()
+        loadVideoAspectRatio()
         refreshFields()
         seek(to: cut.startTime)
     }
@@ -1008,6 +1081,7 @@ private final class CutDetailViewController: UIViewController {
 
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
+        updateDetailLayout(for: view.bounds.size)
         playerLayer.frame = videoContainer.bounds
     }
 
@@ -1079,6 +1153,16 @@ private final class CutDetailViewController: UIViewController {
         contentView.addSubview(previewButton)
 
         let safe = view.safeAreaLayoutGuide
+        let detailVideoWidth = videoContainer.widthAnchor.constraint(equalTo: contentView.widthAnchor)
+        detailVideoWidth.priority = .defaultHigh
+        compactPreviewHeightConstraint = videoContainer.heightAnchor.constraint(
+            lessThanOrEqualTo: scrollView.frameLayoutGuide.heightAnchor,
+            multiplier: 0.46
+        )
+        widePreviewHeightConstraint = videoContainer.heightAnchor.constraint(
+            lessThanOrEqualTo: scrollView.frameLayoutGuide.heightAnchor,
+            multiplier: 0.72
+        )
         NSLayoutConstraint.activate([
             scrollView.topAnchor.constraint(equalTo: safe.topAnchor),
             scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
@@ -1091,18 +1175,20 @@ private final class CutDetailViewController: UIViewController {
             contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
             videoContainer.topAnchor.constraint(equalTo: contentView.topAnchor),
-            videoContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
-            videoContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
-            videoContainer.heightAnchor.constraint(equalTo: videoContainer.widthAnchor, multiplier: 9.0 / 16.0),
+            videoContainer.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            videoContainer.leadingAnchor.constraint(greaterThanOrEqualTo: contentView.leadingAnchor),
+            videoContainer.trailingAnchor.constraint(lessThanOrEqualTo: contentView.trailingAnchor),
+            detailVideoWidth,
 
-            playButton.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor, constant: 20),
+            playButton.trailingAnchor.constraint(equalTo: videoContainer.trailingAnchor, constant: -20),
             playButton.bottomAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: -12),
             playButton.widthAnchor.constraint(equalToConstant: 44),
             playButton.heightAnchor.constraint(equalToConstant: 44),
-            timeLabel.leadingAnchor.constraint(equalTo: playButton.trailingAnchor, constant: 12),
+            timeLabel.leadingAnchor.constraint(equalTo: videoContainer.leadingAnchor, constant: 20),
             timeLabel.centerYAnchor.constraint(equalTo: playButton.centerYAnchor),
+            timeLabel.trailingAnchor.constraint(lessThanOrEqualTo: playButton.leadingAnchor, constant: -12),
 
-            timelineContainer.topAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: 64),
+            timelineContainer.topAnchor.constraint(equalTo: videoContainer.bottomAnchor, constant: 16),
             timelineContainer.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
             timelineContainer.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
             timelineContainer.heightAnchor.constraint(equalToConstant: 86),
@@ -1117,6 +1203,39 @@ private final class CutDetailViewController: UIViewController {
             previewButton.heightAnchor.constraint(equalToConstant: 50),
             previewButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28)
         ])
+        updateDetailLayout(for: view.bounds.size, force: true)
+    }
+
+    private func updateDetailLayout(for size: CGSize, force: Bool = false) {
+        let useWideLayout = size.width > size.height * 1.15
+        guard force || useWideLayout != isUsingWideDetailLayout else { return }
+        isUsingWideDetailLayout = useWideLayout
+        compactPreviewHeightConstraint?.isActive = !useWideLayout
+        widePreviewHeightConstraint?.isActive = useWideLayout
+    }
+
+    private func loadVideoAspectRatio() {
+        videoAspectConstraint = videoContainer.heightAnchor.constraint(
+            equalTo: videoContainer.widthAnchor,
+            multiplier: 9.0 / 16.0
+        )
+        videoAspectConstraint?.isActive = true
+
+        Task { [weak self, asset] in
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let naturalSize = try? await track.load(.naturalSize),
+                  let transform = try? await track.load(.preferredTransform) else { return }
+            let transformedSize = naturalSize.applying(transform)
+            let width = abs(transformedSize.width)
+            let height = abs(transformedSize.height)
+            guard width > 0, height > 0, let self else { return }
+            self.videoAspectConstraint?.isActive = false
+            self.videoAspectConstraint = self.videoContainer.heightAnchor.constraint(
+                equalTo: self.videoContainer.widthAnchor,
+                multiplier: height / width
+            )
+            self.videoAspectConstraint?.isActive = true
+        }
     }
 
     private func makeTimeCard() -> UIView {
