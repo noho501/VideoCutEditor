@@ -126,8 +126,11 @@ final class MainViewController: UIViewController {
 
     private func generateDemoCuts(duration: TimeInterval) -> [VideoCut] {
         let candidates: [VideoCut] = [
-            VideoCut(startTime: 5, endTime: 10),
-            VideoCut(startTime: 20, endTime: 30)
+            VideoCut(startTime: 3, endTime: 8),
+            VideoCut(startTime: 14, endTime: 20),
+            VideoCut(startTime: 27, endTime: 34),
+            VideoCut(startTime: 43, endTime: 50),
+            VideoCut(startTime: 61, endTime: 69)
         ]
 
         return VideoCutValidator.normalizedCuts(candidates, duration: duration)
