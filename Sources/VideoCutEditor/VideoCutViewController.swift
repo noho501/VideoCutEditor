@@ -486,12 +486,13 @@ public final class VideoCutViewController: UIViewController {
                     case .success(let url):
                         do {
                             try await self.saveExportToPhotos(url)
-                            self.onExportCompleted?(url)
                             self.presentAlert(
                                 title: "Saved",
                                 message: "The highlight video was saved to your Photos Library."
                             ) {
-                                self.dismiss(animated: true)
+                                self.dismiss(animated: true) {
+                                    self.onExportCompleted?(url)
+                                }
                             }
                         } catch {
                             self.presentAlert(title: "Save Error", message: error.localizedDescription)
@@ -639,6 +640,10 @@ public final class VideoCutViewController: UIViewController {
             throw PhotoSaveError.unavailable
         }
 
+        try await Self.addVideoToPhotos(url)
+    }
+
+    private nonisolated static func addVideoToPhotos(_ url: URL) async throws {
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             request.addResource(with: .video, fileURL: url, options: nil)

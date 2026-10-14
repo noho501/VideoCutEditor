@@ -19,6 +19,7 @@ final class MainViewController: UIViewController {
         view.backgroundColor = .systemBackground
         title = "VideoCutEditor Demo"
         setupUI()
+        configureBundledVideo()
     }
 
     private func setupUI() {
@@ -70,6 +71,35 @@ final class MainViewController: UIViewController {
             }
         default:
             break
+        }
+    }
+
+    private func configureBundledVideo() {
+        guard let url = Bundle.main.url(
+            forResource: "test-video",
+            withExtension: "MP4"
+        ) else {
+            statusLabel.text = "Bundled test-video.MP4 was not found"
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                let asset = AVURLAsset(url: url)
+                let duration = try await asset.load(.duration).seconds
+                guard duration.isFinite, duration > 0 else {
+                    throw CocoaError(.fileReadCorruptFile)
+                }
+
+                let cuts = generateDemoCuts(duration: duration)
+                selectedVideoURL = url
+                demoCuts = cuts
+                openEditorButton.isEnabled = true
+                statusLabel.text = "Default: test-video.MP4\nCuts: \(cuts.count)"
+            } catch {
+                statusLabel.text = "Unable to read test-video.MP4: \(error.localizedDescription)"
+            }
         }
     }
 

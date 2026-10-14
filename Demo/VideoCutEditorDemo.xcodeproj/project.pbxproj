@@ -12,6 +12,7 @@
 		A10000000000000000000003 /* MainViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000013 /* MainViewController.swift */; };
 		A10000000000000000000004 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000014 /* Assets.xcassets */; };
 		A10000000000000000000005 /* VideoCutEditor in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000040 /* VideoCutEditor */; };
+		C3DD5EA1307F114500AB6EE2 /* test-video.MP4 in Resources */ = {isa = PBXBuildFile; fileRef = C3DD5EA0307F114500AB6EE2 /* test-video.MP4 */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -21,6 +22,7 @@
 		A10000000000000000000013 /* MainViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainViewController.swift; sourceTree = "<group>"; };
 		A10000000000000000000014 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000015 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C3DD5EA0307F114500AB6EE2 /* test-video.MP4 */ = {isa = PBXFileReference; lastKnownFileType = file; path = "test-video.MP4"; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -51,6 +53,7 @@
 				A10000000000000000000013 /* MainViewController.swift */,
 				A10000000000000000000014 /* Assets.xcassets */,
 				A10000000000000000000015 /* Info.plist */,
+				C3DD5EA0307F114500AB6EE2 /* test-video.MP4 */,
 			);
 			path = VideoCutEditorDemo;
 			sourceTree = "<group>";
@@ -128,6 +131,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A10000000000000000000004 /* Assets.xcassets in Resources */,
+				C3DD5EA1307F114500AB6EE2 /* test-video.MP4 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
